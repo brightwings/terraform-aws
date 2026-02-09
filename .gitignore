@@ -1,0 +1,69 @@
+# Terraform State Files
+# These files may contain sensitive data like passwords, private keys, etc.
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+
+# Terraform Directory
+# Contains downloaded providers and modules
+.terraform/
+.terraform.lock.hcl
+
+# Terraform Variables Files
+# May contain sensitive values like credentials, API keys
+*.tfvars
+*.tfvars.json
+
+# Exception: Allow example variable files
+!*.tfvars.example
+!example.tfvars
+
+# Terraform Crash Log Files
+crash.log
+crash.*.log
+
+# Terraform Override Files
+# Used for local development overrides
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform CLI Configuration Files
+.terraformrc
+terraform.rc
+
+# Terraform Plan Output Files
+*.tfplan
+
+# AWS Credentials and Config
+.aws/
+*.pem
+*.key
+
+# Environment Variables Files
+.env
+.env.*
+!.env.example
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup Files
+*.bak
+*.backup
+
+# SSH Keys
+id_rsa*
+*.ppk
+
+# Sensitive Documentation
+secrets.md
+credentials.md
+keys.md
