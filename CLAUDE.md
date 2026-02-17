@@ -2,92 +2,70 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Overview
+## What This Repository Is
 
-This repository manages AWS IAM infrastructure using Terraform for the Brightwings organization. It provisions IAM users, groups, and associated policies using infrastructure as code.
+A SaaS Security Automation Platform for Brightwings. It automates the full user access lifecycle (onboarding, offboarding, drift detection, telemetry normalization) across GitHub, Slack, AWS IAM, and Jira using Terraform, Step Functions, and Lambda.
 
-## Terraform Configuration
+**AWS provider profile**: `tf-user-isaac` (must exist in `~/.aws/credentials`)
+**AWS provider version**: `~> 6.31.0`
+**State**: Local (`terraform.tfstate`) — no remote backend yet
 
-**Provider Profile**: `tf-user-isaac`
-- The AWS provider is configured to use the `tf-user-isaac` profile from AWS credentials
-- This profile must exist in `~/.aws/credentials` or be configured via AWS CLI
+## Commands
 
-**Terraform Version**: Uses AWS provider version 6.31.0
-
-## Common Commands
-
-### Initialize and Plan
 ```bash
-terraform init          # Initialize Terraform (required after cloning or adding providers)
-terraform plan          # Preview changes before applying
-terraform apply         # Apply infrastructure changes
+# Terraform
+terraform init        # Required after cloning or adding modules
+terraform validate    # Check syntax (no AWS calls)
+terraform plan        # Preview changes (read-only AWS calls)
+terraform apply       # Deploy — requires team design doc approval first
+
+# Lambda local testing (Python 3, requires .venv)
+python3 -m venv .venv && .venv/bin/pip install boto3
+.venv/bin/python3 functions/<function_name>/handler.py
+
+# Test with mocked boto3
+.venv/bin/python3 -c "
+import unittest.mock as mock
+# ... mock boto3.client, then import and call handler
+"
 ```
 
-### State Management
-```bash
-terraform state list                           # List all resources in state
-terraform state show <resource>                # Show detailed state of a resource
-terraform import <resource_type>.<name> <id>   # Import existing AWS resources
-```
+**Important**: Do not run `terraform apply` without first getting team sign-off on `DESIGN_DOC.md`. All Lambda API calls are currently mocked — real API calls must be uncommented before deployment.
 
-### Importing Existing IAM Resources
-When importing existing IAM users or groups:
-```bash
-terraform import aws_iam_user.<resource_name> <aws_username>
-terraform import aws_iam_group.<resource_name> <aws_groupname>
-```
+## Architecture
 
-After importing, run `terraform plan` to identify any configuration drift (tags, paths, etc.) that need to be added to the Terraform configuration.
+The platform has three layers:
 
-## Infrastructure Architecture
+**1. Terraform (`main.tf` + `modules/`)** — Infrastructure definition only. The four modules are:
+- `modules/dynamodb/` — Two tables: `provisioning_state` (user×system access tracking) and `drift_events` (detected mismatches)
+- `modules/iam/` — One IAM execution role per Lambda (least privilege), plus the `developers` group replacing `AdministratorAccess`
+- `modules/step_functions/` — Step Functions infrastructure (roles, logging)
+- `modules/eventbridge/` — Scheduled rule triggering drift detection daily at 9am UTC
 
-### IAM Users
-- **isaac**: Developer user
-- **tf-user-isaac**: Terraform automation user (used by the provider)
-- **nicole**: Developer user
+**2. Lambda Functions (`functions/`)** — Python business logic, never deployed via Terraform yet. All boto3 API calls to external SaaS systems are mocked with comments showing the real implementation. Functions are grouped by workflow:
 
-All users are tagged with `ManagedBy = "terraform"` to indicate they are managed by this Terraform configuration.
+- *Onboarding*: `validate_input` → `create_record` → `provision_{github,slack,aws,jira}` (parallel) → `finalize_execution`
+- *Offboarding*: `validate_offboarding` → `mark_deprovisioning` → `deprovision_{github,slack,aws,jira}` (parallel) → `finalize_offboarding`
+- *Ongoing*: `detect_drift` (called by EventBridge), `normalize_telemetry` (called after every event)
 
-### IAM Groups
-- **administrators**: Group with AdministratorAccess policy attached
-- **developers**: Group for developer-level access (no policies attached yet)
+**3. State Machines (`state_machines/`)** — JSON definitions for Step Functions. Both use `Type: Parallel` to run all system branches simultaneously. The offboarding machine uses `Type: Choice` to skip systems where the user was never provisioned.
 
-### Policy Attachments
-- The `administrators` group has the AWS managed policy `AdministratorAccess` attached via `aws_iam_group_policy_attachment`
+## Key Design Decisions
 
-## File Structure
+**DynamoDB schema**: `user_id` (partition) + `system` (sort) composite key. Status flow: `pending → active → deprovisioning → deprovisioned`. The `mark_deprovisioning` Lambda uses a conditional update (`ConditionExpression='status = :active'`) to prevent concurrent offboarding workflows.
 
-- `main.tf`: Primary infrastructure definitions (users, groups, policy attachments)
-- `variables.tf`: Variable definitions (currently empty)
-- `output.tf`: Output definitions (currently empty)
-- `terraform.tfstate`: Current state (DO NOT manually edit)
-- `terraform.tfstate.backup`: Previous state backup
+**Deprovisioning order**: Teams/groups are removed before account deactivation. If the final account removal fails, the user has already lost resource access. This is intentional (defense in depth).
 
-## Working with This Repository
+**Idempotency**: Every Lambda checks current state before acting. If the user is already in the desired state, it returns success without calling external APIs. This makes Step Functions automatic retries safe.
 
-### Adding New Users
-1. Add a new `aws_iam_user` resource in `main.tf`
-2. Include the `ManagedBy = "terraform"` tag for consistency
-3. Run `terraform plan` to preview
-4. Run `terraform apply` to create
+**GitHub access model**: `provision_github` adds users to the org with `team_ids=[]` — zero repo access by default. Repo access requires a separate team assignment step (not yet implemented).
 
-### Adding Users to Groups
-Use `aws_iam_user_group_membership` resources to assign users to groups:
-```hcl
-resource "aws_iam_user_group_membership" "user_groups" {
-  user = aws_iam_user.<username>.name
-  groups = [
-    aws_iam_group.<groupname>.name,
-  ]
-}
-```
+**Telemetry normalization**: `normalize_telemetry` maps all internal events to ECS schema (`event.action`, `event.severity` 0-100, `event.outcome`). Severity ≥90 = page on-call; 50-89 = ticket; <50 = log only.
 
-### Attaching Policies to Groups
-Use `aws_iam_group_policy_attachment` for AWS managed policies, or `aws_iam_group_policy` for inline policies.
+**Mock vs real API calls**: Real GitHub, Jira, and Slack API calls are commented out in every Lambda with `# In production:` blocks showing the actual `requests` library implementation. Unmock before deploying.
 
-## Important Notes
+## Existing IAM Users (Pre-Automation)
 
-- This repository manages IAM access control - changes directly affect AWS account security
-- Always run `terraform plan` before `terraform apply` to review changes
-- The `tf-user-isaac` user must have sufficient IAM permissions to manage users, groups, and policies
-- Imported resources may have tags or configurations not reflected in Terraform - check `terraform plan` output carefully
+`isaac`, `nicole`, `tf-user-isaac`, `tf-user-nicole` are defined directly in `main.tf` (not in a module) for migration safety. They are assigned to `module.iam.developers_group_name` — the new least-privilege group — not the legacy `administrators` group.
+
+The `administrators` group resource is kept in `main.tf` but has no policy attachment and no members.
