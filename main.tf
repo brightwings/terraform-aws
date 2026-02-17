@@ -169,13 +169,25 @@ resource "aws_iam_group" "developers_legacy" {
   path = "/"
 }
 
-# TODO: Future modules (not implemented yet)
+# TODO: Wire up once Lambda functions are deployed to AWS
 # module "lambda" {
 #   source = "./modules/lambda"
-#   # Lambda function infrastructure
 # }
 #
 # module "step_functions" {
 #   source = "./modules/step_functions"
-#   # State machine definitions
+# }
+
+# Module: EventBridge - Drift Detection Scheduled Trigger
+# TODO: Uncomment once detect_drift Lambda is deployed
+#
+# module "eventbridge" {
+#   source = "./modules/eventbridge"
+#
+#   name_prefix              = local.name_prefix
+#   detect_drift_lambda_arn  = module.lambda.detect_drift_arn
+#   detect_drift_lambda_name = module.lambda.detect_drift_name
+#   drift_check_schedule     = "cron(0 9 * * ? *)"  # Daily at 9am UTC
+#
+#   tags = local.common_tags
 # }
