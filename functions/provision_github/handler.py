@@ -34,14 +34,12 @@ External Dependencies:
 import json
 import logging
 import os
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
-
-# Note: In production, install with: pip install requests -t .
-# For this demo, we'll show the structure without actual GitHub API calls
-# import requests  # Uncomment for real GitHub API integration
 
 # Configure logging
 logger = logging.getLogger()
@@ -61,11 +59,45 @@ PROVISIONING_STATE_TABLE = os.environ.get(
     'saas-automation-dev-provisioning-state'
 )
 GITHUB_ORG = os.environ.get('GITHUB_ORG', 'brightwings')
+GITHUB_API = 'https://api.github.com'
 
 
 class GitHubProvisioningError(Exception):
     """Custom exception for GitHub provisioning failures"""
     pass
+
+
+def _github_api(method: str, path: str, token: str, body: dict = None) -> tuple:
+    """
+    Make a GitHub API call using urllib (stdlib - no extra packages needed).
+
+    Args:
+        method: HTTP method (GET, POST, DELETE)
+        path: API path (e.g. /users/isaacbryant)
+        token: GitHub personal access token
+        body: Optional request body dict (JSON-encoded automatically)
+
+    Returns:
+        Tuple of (status_code, response_dict)
+    """
+    url = f'{GITHUB_API}{path}'
+    data = json.dumps(body).encode('utf-8') if body is not None else None
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    if data:
+        headers['Content-Type'] = 'application/json'
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode('utf-8')
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8')
+        return e.code, json.loads(raw) if raw else {}
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -150,6 +182,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "github_username": github_username,
             "github_org": GITHUB_ORG,
             "github_role": "member",
+            "status": "success",           # read by finalize_execution to mark DynamoDB 'active'
             "provisioning_status": "success",
             "provisioned_at": datetime.utcnow().isoformat() + "Z"
         }
@@ -243,24 +276,16 @@ def verify_github_user_exists(github_username: str, github_token: str) -> bool:
     Returns:
         True if user exists, False otherwise
     """
-
-    # MOCK: For this demo, simulate API call
-    # In production, use:
-    # response = requests.get(
-    #     f'https://api.github.com/users/{github_username}',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    # return response.status_code == 200
+    status, _ = _github_api('GET', f'/users/{github_username}', github_token)
 
     logger.info(json.dumps({
-        "event": "verifying_github_user_exists",
+        "event": "github_user_exists_check",
         "github_username": github_username,
-        "note": "MOCK: Simulating API call - assuming user exists"
+        "status_code": status,
+        "exists": status == 200
     }))
 
-    # Mock: Return True (assume user exists)
-    # In real implementation, this would call GitHub API
-    return True
+    return status == 200
 
 
 def check_user_exists_in_org(github_username: str, github_token: str) -> bool:
@@ -268,32 +293,31 @@ def check_user_exists_in_org(github_username: str, github_token: str) -> bool:
     Check if user already exists in GitHub org (idempotency)
 
     GitHub API: GET /orgs/{org}/members/{username}
-    Returns: 204 if user is member, 404 if not
+    Returns: 204 if user is member, 302/404 if not
 
     Args:
         github_username: GitHub username to check
         github_token: GitHub API token
 
     Returns:
-        True if user exists, False otherwise
+        True if user is already an org member, False otherwise
     """
+    status, _ = _github_api(
+        'GET',
+        f'/orgs/{GITHUB_ORG}/members/{github_username}',
+        github_token
+    )
 
-    # MOCK: For this demo, simulate API call
-    # In production, use:
-    # response = requests.get(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/members/{github_username}',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    # return response.status_code == 204
-
+    is_member = status == 204
     logger.info(json.dumps({
-        "event": "checking_github_user_exists",
+        "event": "org_membership_check",
         "github_username": github_username,
-        "note": "MOCK: Simulating API call"
+        "github_org": GITHUB_ORG,
+        "status_code": status,
+        "is_member": is_member
     }))
 
-    # Mock: Return False (user doesn't exist, need to invite)
-    return False
+    return is_member
 
 
 def invite_user_to_org(
@@ -339,41 +363,57 @@ def invite_user_to_org(
         GitHubProvisioningError: If invitation fails
     """
 
-    # MOCK: For this demo, simulate API call
-    # In production, use:
-    #
-    # # Step 1: Get GitHub user ID from username
-    # user_response = requests.get(
-    #     f'https://api.github.com/users/{github_username}',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    # user_id = user_response.json()['id']
-    #
-    # # Step 2: Send organization invitation (NO team assignments)
-    # response = requests.post(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/invitations',
-    #     headers={'Authorization': f'token {github_token}'},
-    #     json={
-    #         'invitee_id': user_id,
-    #         'role': 'direct_member',  # Org member (not admin)
-    #         'team_ids': []            # EMPTY: No team access = no repo access
-    #     }
-    # )
-    #
-    # if response.status_code != 201:
-    #     raise GitHubProvisioningError(f"GitHub API error: {response.text}")
+    # Step 1: Get GitHub user ID from username
+    status, user_data = _github_api('GET', f'/users/{github_username}', github_token)
+    if status != 200:
+        raise GitHubProvisioningError(
+            f"Cannot get GitHub user ID for '{github_username}' (HTTP {status})"
+        )
+    github_user_id = user_data['id']
 
     logger.info(json.dumps({
-        "event": "github_invitation_sent",
+        "event": "github_user_id_retrieved",
         "github_username": github_username,
-        "email": email,
-        "role": role,
-        "team_ids": [],  # No teams = no repo access (secure default)
-        "note": "MOCK: User will be org member but have NO repository access by default"
+        "github_user_id": github_user_id
     }))
 
-    # Mock: Simulate successful invitation
-    pass
+    # Step 2: Send organization invitation (NO team assignments = no repo access)
+    status, response = _github_api(
+        'POST',
+        f'/orgs/{GITHUB_ORG}/invitations',
+        github_token,
+        body={
+            'invitee_id': github_user_id,
+            'role': 'direct_member',  # Org member (not admin)
+            'team_ids': []            # EMPTY: No team access = no repo access
+        }
+    )
+
+    if status == 201:
+        logger.info(json.dumps({
+            "event": "github_invitation_sent",
+            "github_username": github_username,
+            "github_user_id": github_user_id,
+            "github_org": GITHUB_ORG,
+            "role": "direct_member",
+            "team_ids": [],  # No teams = no repo access (secure default)
+            "invitation_id": response.get('id')
+        }))
+    elif status == 422:
+        # 422 can mean user is already a member or has a pending invitation
+        message = response.get('message', '')
+        errors = response.get('errors', [])
+        logger.info(json.dumps({
+            "event": "github_invitation_already_exists",
+            "github_username": github_username,
+            "message": message,
+            "errors": errors
+        }))
+        # Treat as success — user will be (or already is) a member
+    else:
+        raise GitHubProvisioningError(
+            f"GitHub invitation failed (HTTP {status}): {response.get('message', response)}"
+        )
 
 
 def update_dynamodb_record(
@@ -447,10 +487,10 @@ if __name__ == "__main__":
     }
 
     class MockContext:
-        request_id = "local-test-12345"
+        aws_request_id = "local-test-12345"
         function_name = "provision_github"
 
-    print("Note: This uses MOCK GitHub API calls (no real API requests)\n")
+    print("Note: This calls the real GitHub API (requires AWS credentials for Secrets Manager)\n")
 
     try:
         result = lambda_handler(test_event, MockContext())

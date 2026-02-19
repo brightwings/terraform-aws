@@ -16,23 +16,24 @@ Output:
     ...input fields...,
     "deprovisioning_status": "success",
     "actions_taken": [
+        "removed_from_all_teams",
         "removed_from_org",
-        "revoked_all_tokens",
         "logged_security_event"
     ],
     "deprovisioned_at": "2026-02-17T16:00:00Z"
 }
 
 Security Actions:
-1. Remove user from GitHub organization
-2. Remove from all teams (loses all repo access)
-3. Revoke personal access tokens (if possible)
-4. Log security event for audit trail
+1. Remove user from all teams (revokes all repo access)
+2. Remove user from GitHub organization
+3. Log security event for audit trail
 """
 
 import json
 import logging
 import os
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Dict, Any, List
 import boto3
@@ -56,11 +57,45 @@ PROVISIONING_STATE_TABLE = os.environ.get(
     'saas-automation-dev-provisioning-state'
 )
 GITHUB_ORG = os.environ.get('GITHUB_ORG', 'brightwings')
+GITHUB_API = 'https://api.github.com'
 
 
 class GitHubDeprovisioningError(Exception):
     """Custom exception for GitHub deprovisioning failures"""
     pass
+
+
+def _github_api(method: str, path: str, token: str, body: dict = None) -> tuple:
+    """
+    Make a GitHub API call using urllib (stdlib - no extra packages needed).
+
+    Args:
+        method: HTTP method (GET, DELETE, etc.)
+        path: API path (e.g. /orgs/brightwings/members/username)
+        token: GitHub personal access token
+        body: Optional request body dict (JSON-encoded automatically)
+
+    Returns:
+        Tuple of (status_code, response_dict)
+    """
+    url = f'{GITHUB_API}{path}'
+    data = json.dumps(body).encode('utf-8') if body is not None else None
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    if data:
+        headers['Content-Type'] = 'application/json'
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode('utf-8')
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8')
+        return e.code, json.loads(raw) if raw else {}
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -112,6 +147,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             actions_taken = []
 
             # Step 3: Remove from all teams first (revokes repo access)
+            # Security principle: remove repo access BEFORE org membership.
+            # If org removal later fails, user still loses repo access.
             remove_from_all_teams(github_username, github_token)
             actions_taken.append("removed_from_all_teams")
 
@@ -200,7 +237,7 @@ def check_user_in_org(github_username: str, github_token: str) -> bool:
     Check if user is still in GitHub org (idempotency)
 
     GitHub API: GET /orgs/{org}/members/{username}
-    Returns: 204 if member, 404 if not
+    Returns: 204 if member, 302/404 if not
 
     Args:
         github_username: GitHub username
@@ -209,70 +246,93 @@ def check_user_in_org(github_username: str, github_token: str) -> bool:
     Returns:
         True if user is in org, False otherwise
     """
+    status, _ = _github_api(
+        'GET',
+        f'/orgs/{GITHUB_ORG}/members/{github_username}',
+        github_token
+    )
 
-    # MOCK: For demo
-    # In production:
-    # response = requests.get(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/members/{github_username}',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    # return response.status_code == 204
-
+    is_member = status == 204
     logger.info(json.dumps({
-        "event": "checking_user_in_org",
+        "event": "org_membership_check",
         "github_username": github_username,
-        "note": "MOCK: Assuming user is in org"
+        "github_org": GITHUB_ORG,
+        "status_code": status,
+        "is_member": is_member
     }))
 
-    return True  # Mock: User is in org
+    return is_member
 
 
 def remove_from_all_teams(github_username: str, github_token: str) -> None:
     """
-    Remove user from all GitHub teams (revokes repo access)
+    Remove user from all GitHub teams (revokes all repo access)
 
-    Security Principle: Remove repo access BEFORE org membership
-    Why: If org removal fails, user still loses repo access
+    Security Principle: Remove repo access BEFORE org membership.
+    Why: If org removal fails, user still loses repo access.
 
     GitHub API:
-    1. GET /orgs/{org}/teams/{team_slug}/memberships/{username} (list teams)
-    2. DELETE /orgs/{org}/teams/{team_slug}/memberships/{username} (remove)
+    1. GET /orgs/{org}/teams?per_page=100 - list all teams
+    2. GET /orgs/{org}/teams/{team_slug}/memberships/{username} - check membership
+    3. DELETE /orgs/{org}/teams/{team_slug}/memberships/{username} - remove
 
     Args:
         github_username: GitHub username
         github_token: GitHub API token
 
     Raises:
-        GitHubDeprovisioningError: If team removal fails
+        GitHubDeprovisioningError: If team listing fails
     """
+    status, teams = _github_api(
+        'GET',
+        f'/orgs/{GITHUB_ORG}/teams?per_page=100',
+        github_token
+    )
 
-    # MOCK: For demo
-    # In production:
-    # # Get all teams user belongs to
-    # teams_response = requests.get(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/teams',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    # teams = teams_response.json()
-    #
-    # for team in teams:
-    #     # Check if user is in team
-    #     member_response = requests.get(
-    #         f'https://api.github.com/orgs/{GITHUB_ORG}/teams/{team['slug']}/memberships/{github_username}',
-    #         headers={'Authorization': f'token {github_token}'}
-    #     )
-    #
-    #     if member_response.status_code == 200:
-    #         # Remove from team
-    #         requests.delete(
-    #             f'https://api.github.com/orgs/{GITHUB_ORG}/teams/{team['slug']}/memberships/{github_username}',
-    #             headers={'Authorization': f'token {github_token}'}
-    #         )
+    if status != 200:
+        raise GitHubDeprovisioningError(
+            f"Failed to list org teams (HTTP {status})"
+        )
+
+    removed_teams = []
+    for team in teams:
+        team_slug = team['slug']
+
+        # Check if user is in this team
+        membership_status, _ = _github_api(
+            'GET',
+            f'/orgs/{GITHUB_ORG}/teams/{team_slug}/memberships/{github_username}',
+            github_token
+        )
+
+        if membership_status == 200:
+            # User is in this team — remove them
+            del_status, _ = _github_api(
+                'DELETE',
+                f'/orgs/{GITHUB_ORG}/teams/{team_slug}/memberships/{github_username}',
+                github_token
+            )
+
+            if del_status == 204:
+                removed_teams.append(team_slug)
+                logger.info(json.dumps({
+                    "event": "removed_from_team",
+                    "github_username": github_username,
+                    "team_slug": team_slug
+                }))
+            else:
+                logger.warning(json.dumps({
+                    "event": "team_removal_failed",
+                    "github_username": github_username,
+                    "team_slug": team_slug,
+                    "status_code": del_status
+                }))
 
     logger.info(json.dumps({
         "event": "removed_from_all_teams",
         "github_username": github_username,
-        "note": "MOCK: User removed from all teams (loses all repo access)"
+        "teams_removed": removed_teams,
+        "teams_checked": len(teams)
     }))
 
 
@@ -281,6 +341,7 @@ def remove_from_org(github_username: str, github_token: str) -> None:
     Remove user from GitHub organization
 
     GitHub API: DELETE /orgs/{org}/members/{username}
+    Returns: 204 on success
 
     Args:
         github_username: GitHub username
@@ -289,24 +350,21 @@ def remove_from_org(github_username: str, github_token: str) -> None:
     Raises:
         GitHubDeprovisioningError: If org removal fails (CRITICAL!)
     """
+    status, response = _github_api(
+        'DELETE',
+        f'/orgs/{GITHUB_ORG}/members/{github_username}',
+        github_token
+    )
 
-    # MOCK: For demo
-    # In production:
-    # response = requests.delete(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/members/{github_username}',
-    #     headers={'Authorization': f'token {github_token}'}
-    # )
-    #
-    # if response.status_code != 204:
-    #     raise GitHubDeprovisioningError(
-    #         f"Failed to remove user from org: {response.text}"
-    #     )
+    if status != 204:
+        raise GitHubDeprovisioningError(
+            f"Failed to remove user from org (HTTP {status}): {response.get('message', response)}"
+        )
 
     logger.info(json.dumps({
         "event": "removed_from_org",
         "github_username": github_username,
-        "github_org": GITHUB_ORG,
-        "note": "MOCK: User removed from GitHub organization"
+        "github_org": GITHUB_ORG
     }))
 
 
@@ -318,22 +376,6 @@ def log_security_event(
 ) -> None:
     """
     Log security event for offboarding (audit trail)
-
-    Security Event Schema:
-    {
-        "event_type": "user_deprovisioned",
-        "system": "github",
-        "user_id": "nicole",
-        "reason": "termination",
-        "actions_taken": [...],
-        "timestamp": "2026-02-17T16:00:00Z"
-    }
-
-    This would be stored in:
-    - CloudWatch Logs (immediate)
-    - DynamoDB security_events table (queryable)
-    - S3 for long-term retention (compliance)
-    - SIEM (Splunk, Datadog, etc.)
 
     Args:
         user_id: Canonical user ID
@@ -422,12 +464,6 @@ def alert_security_team_critical_failure(
     Deprovisioning failures are security incidents!
     User may still have access to sensitive resources.
 
-    Alert channels:
-    - PagerDuty (P1 incident)
-    - Slack #security-alerts
-    - Email to security@brightwings.io
-    - SNS topic for security events
-
     Args:
         user_id: User who should be deprovisioned
         system: System where deprovisioning failed
@@ -464,10 +500,10 @@ if __name__ == "__main__":
     }
 
     class MockContext:
-        request_id = "local-test-12345"
+        aws_request_id = "local-test-12345"
         function_name = "deprovision_github"
 
-    print("Note: This uses MOCK GitHub API calls\n")
+    print("Note: This calls the real GitHub API (requires AWS credentials for Secrets Manager)\n")
 
     try:
         result = lambda_handler(test_event, MockContext())
