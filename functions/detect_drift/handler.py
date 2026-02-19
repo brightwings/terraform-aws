@@ -42,6 +42,8 @@ import json
 import logging
 import os
 import uuid
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import boto3
@@ -77,6 +79,35 @@ JIRA_SECRET_ARN = os.environ.get(
 JIRA_SITE = os.environ.get('JIRA_SITE', 'brightwings')
 DRIFT_ALERT_SNS_ARN = os.environ.get('DRIFT_ALERT_SNS_ARN', '')
 NAME_PREFIX = os.environ.get('NAME_PREFIX', 'saas-automation-dev')
+
+
+def _github_api(method: str, path: str, token: str) -> tuple:
+    """Make a GitHub API call using stdlib urllib."""
+    url = f'https://api.github.com{path}'
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    req = urllib.request.Request(url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode('utf-8')
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8')
+        return e.code, json.loads(raw) if raw else {}
+
+
+def get_github_token() -> str:
+    """Retrieve GitHub API token from Secrets Manager."""
+    response = secrets_manager.get_secret_value(SecretId=GITHUB_SECRET_ARN)
+    secret = response['SecretString']
+    try:
+        d = json.loads(secret)
+        return d.get('github_token') or d.get('token')
+    except json.JSONDecodeError:
+        return secret
 
 
 class DriftEvent:
@@ -282,8 +313,10 @@ def check_github_drift(records: List[Dict[str, Any]]) -> List[DriftEvent]:
     Check GitHub org for drift against DynamoDB records
 
     Checks:
-    1. ACCESS_REMOVED: User in DynamoDB but not in GitHub org
-    2. (Future) UNAUTHORIZED_ACCESS: User in GitHub org but not in DynamoDB
+    1. ACCESS_REMOVED: User in DynamoDB as 'active' but not in GitHub org
+       → Someone was removed from the org outside the offboarding workflow
+    2. UNAUTHORIZED_ACCESS: User in GitHub org but no DynamoDB record
+       → Someone was added to the org outside the onboarding workflow
 
     Args:
         records: DynamoDB records for GitHub system
@@ -292,36 +325,56 @@ def check_github_drift(records: List[Dict[str, Any]]) -> List[DriftEvent]:
         List of drift events detected
     """
 
-    if not records:
-        return []
-
     drift_events = []
 
-    # MOCK: In production, fetch all org members at once
-    # import requests
-    # response = requests.get(
-    #     f'https://api.github.com/orgs/{GITHUB_ORG}/members',
-    #     headers={'Authorization': f'token {github_token}'},
-    #     params={'per_page': 100}
-    # )
-    # actual_members = {m['login'] for m in response.json()}
+    try:
+        github_token = get_github_token()
+    except Exception as e:
+        logger.error(json.dumps({
+            "event": "github_token_retrieval_failed",
+            "error": str(e)
+        }))
+        return drift_events
 
-    # For demo: Simulate one user with drift
-    actual_members = set()  # Mock: empty org (all users removed = drift!)
+    # Fetch all current org members from GitHub (paginate to handle large orgs)
+    actual_members = {}  # login -> user dict
+    page = 1
+    while True:
+        status, page_members = _github_api(
+            'GET',
+            f'/orgs/{GITHUB_ORG}/members?per_page=100&page={page}',
+            github_token
+        )
+        if status != 200 or not page_members:
+            break
+        for m in page_members:
+            actual_members[m['login']] = m
+        if len(page_members) < 100:
+            break
+        page += 1
 
+    logger.info(json.dumps({
+        "event": "github_members_fetched",
+        "github_org": GITHUB_ORG,
+        "actual_member_count": len(actual_members)
+    }))
+
+    # Build set of usernames tracked in DynamoDB
+    tracked_usernames = {}  # github_login -> user_id
     for record in records:
         user_id = record.get('user_id', {}).get('S', '')
         github_username = record.get('system_username', {}).get('S', '')
-
         if not github_username:
             logger.warning(json.dumps({
                 "event": "missing_github_username",
                 "user_id": user_id,
-                "message": "No GitHub username in DynamoDB record"
+                "message": "No GitHub username in DynamoDB record — cannot check drift"
             }))
             continue
+        tracked_usernames[github_username] = user_id
 
-        # Check 1: ACCESS_REMOVED - Expected active, but not in org
+    # Check 1: ACCESS_REMOVED — tracked in DynamoDB but not in org
+    for github_username, user_id in tracked_usernames.items():
         if github_username not in actual_members:
             drift_event = DriftEvent(
                 user_id=user_id,
@@ -333,18 +386,43 @@ def check_github_drift(records: List[Dict[str, Any]]) -> List[DriftEvent]:
                 details={
                     "github_username": github_username,
                     "github_org": GITHUB_ORG,
-                    "message": f"User {github_username} removed from {GITHUB_ORG} org outside automation",
-                    "remediation": "Investigate manual removal or re-provision user"
+                    "message": f"{github_username} removed from {GITHUB_ORG} org outside the offboarding workflow",
+                    "remediation": "Verify intentional removal and run offboarding workflow to update DynamoDB"
                 }
             )
             drift_events.append(drift_event)
-
             logger.warning(json.dumps({
                 "event": "drift_detected",
                 "drift_type": "ACCESS_REMOVED",
                 "system": "github",
                 "user_id": user_id,
                 "github_username": github_username,
+                "severity": "CRITICAL"
+            }))
+
+    # Check 2: UNAUTHORIZED_ACCESS — in org but not tracked in DynamoDB
+    for github_login in actual_members:
+        if github_login not in tracked_usernames:
+            drift_event = DriftEvent(
+                user_id=github_login,  # no canonical user_id — use github login
+                system="github",
+                drift_type="UNAUTHORIZED_ACCESS",
+                expected_state="not_provisioned",
+                actual_state="org_member",
+                severity="CRITICAL",
+                details={
+                    "github_username": github_login,
+                    "github_org": GITHUB_ORG,
+                    "message": f"{github_login} is in the {GITHUB_ORG} org but was never onboarded through the provisioning workflow",
+                    "remediation": "Verify this person should have access. If not, remove immediately. If yes, run onboarding to track them."
+                }
+            )
+            drift_events.append(drift_event)
+            logger.warning(json.dumps({
+                "event": "drift_detected",
+                "drift_type": "UNAUTHORIZED_ACCESS",
+                "system": "github",
+                "github_username": github_login,
                 "severity": "CRITICAL"
             }))
 
