@@ -172,7 +172,7 @@ def mark_system_deprovisioning(user_id: str, system: str, reason: str) -> None:
                 'system': {'S': system}
             },
             UpdateExpression='SET #status = :deprovisioning_status, deprovisioning_started_at = :timestamp, deprovisioning_reason = :reason',
-            ConditionExpression='#status = :active_status',
+            ConditionExpression='#status IN (:active_status, :deprovisioning_status)',
             ExpressionAttributeNames={
                 '#status': 'status'
             },

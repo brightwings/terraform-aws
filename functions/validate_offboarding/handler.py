@@ -167,16 +167,18 @@ def get_active_provisioning_records(user_id: str) -> List[Dict[str, Any]]:
     """
 
     try:
+        # Accept 'active' and 'deprovisioning' to allow retrying failed offboardings
         response = dynamodb.query(
             TableName=PROVISIONING_STATE_TABLE,
             KeyConditionExpression='user_id = :user_id',
-            FilterExpression='#status = :status',
+            FilterExpression='#status IN (:active, :deprovisioning)',
             ExpressionAttributeNames={
                 '#status': 'status'
             },
             ExpressionAttributeValues={
                 ':user_id': {'S': user_id},
-                ':status': {'S': 'active'}
+                ':active': {'S': 'active'},
+                ':deprovisioning': {'S': 'deprovisioning'}
             }
         )
 
