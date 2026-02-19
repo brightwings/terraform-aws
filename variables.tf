@@ -4,7 +4,7 @@
 variable "aws_profile" {
   description = "AWS CLI profile to use for authentication"
   type        = string
-  default     = "tf-user-isaac"
+  default     = "tf-user-saas-automation"
 }
 
 variable "aws_region" {

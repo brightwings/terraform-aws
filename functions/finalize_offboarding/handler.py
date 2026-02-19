@@ -75,7 +75,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "finalize_offboarding_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "user_id": event.get('user_id')
     }))
 
@@ -134,7 +134,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "finalize_offboarding_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "workflow_status": workflow_status,
             "systems_deprovisioned": systems_deprovisioned,
@@ -146,7 +146,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "finalize_offboarding_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": event.get('user_id'),
             "error": str(e),
             "error_type": type(e).__name__

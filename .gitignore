@@ -14,6 +14,9 @@ venv/
 .terraform.lock.hcl
 *.tfvars
 
+# Lambda build artifacts
+.build/
+
 # Backup files
 *.old
 

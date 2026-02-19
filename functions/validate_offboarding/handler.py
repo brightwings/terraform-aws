@@ -73,7 +73,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "offboarding_validation_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "input": event
     }))
 
@@ -121,7 +121,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "offboarding_validation_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "active_systems": active_systems,
             "systems_count": len(active_systems)
@@ -132,7 +132,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except ValidationError as e:
         logger.error(json.dumps({
             "event": "validation_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": "ValidationError"
         }))
@@ -141,7 +141,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "validation_error",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))

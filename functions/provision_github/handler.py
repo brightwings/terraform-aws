@@ -85,7 +85,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "github_provisioning_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "user_id": event.get('user_id')
     }))
 
@@ -156,7 +156,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "github_provisioning_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "github_username": github_username
         }))
@@ -166,7 +166,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "github_provisioning_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))

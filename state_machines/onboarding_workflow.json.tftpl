@@ -1,0 +1,434 @@
+{
+  "Comment": "SaaS User Onboarding Workflow - Provisions users across multiple systems in parallel",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Task",
+      "Resource": "${validate_input_arn}",
+      "Comment": "Validates onboarding request input (user_id, email, role, systems, github_username)",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["ValidationError"],
+          "ResultPath": "$.error",
+          "Next": "ValidationFailed"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UnexpectedError"
+        }
+      ],
+      "Next": "CreateProvisioningRecord"
+    },
+
+    "CreateProvisioningRecord": {
+      "Type": "Task",
+      "Resource": "${create_record_arn}",
+      "Comment": "Creates provisioning state records in DynamoDB (one per system)",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "DynamoDBWriteFailed"
+        }
+      ],
+      "Next": "CheckSystemsToProvision"
+    },
+
+    "CheckSystemsToProvision": {
+      "Type": "Choice",
+      "Comment": "Determine which systems to provision based on input",
+      "Choices": [
+        {
+          "Variable": "$.systems",
+          "IsPresent": true,
+          "Next": "ComputeSystemFlags"
+        }
+      ],
+      "Default": "NoSystemsSpecified"
+    },
+
+    "ComputeSystemFlags": {
+      "Type": "Pass",
+      "Comment": "Pre-compute boolean flags stored in $.system_flags to avoid index-out-of-bounds errors while preserving original state",
+      "Parameters": {
+        "provision_github.$": "States.ArrayContains($.systems, 'github')",
+        "provision_slack.$": "States.ArrayContains($.systems, 'slack')",
+        "provision_aws.$": "States.ArrayContains($.systems, 'aws')",
+        "provision_jira.$": "States.ArrayContains($.systems, 'jira')"
+      },
+      "ResultPath": "$.system_flags",
+      "Next": "ProvisionSystemsParallel"
+    },
+
+    "ProvisionSystemsParallel": {
+      "Type": "Parallel",
+      "Comment": "Provision all systems in parallel for faster execution",
+      "Branches": [
+        {
+          "StartAt": "CheckIfGitHubRequested",
+          "States": {
+            "CheckIfGitHubRequested": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.provision_github",
+                  "BooleanEquals": true,
+                  "Next": "ProvisionGitHub"
+                }
+              ],
+              "Default": "GitHubSkipped"
+            },
+            "ProvisionGitHub": {
+              "Type": "Task",
+              "Resource": "${provision_github_arn}",
+              "Comment": "Provisions user in GitHub organization",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.github_error",
+                  "Next": "GitHubProvisioningFailed"
+                }
+              ],
+              "ResultPath": "$.github_result",
+              "End": true
+            },
+            "GitHubProvisioningFailed": {
+              "Type": "Pass",
+              "Comment": "GitHub provisioning failed, but continue with other systems",
+              "Result": {
+                "status": "failed",
+                "system": "github"
+              },
+              "ResultPath": "$.github_result",
+              "End": true
+            },
+            "GitHubSkipped": {
+              "Type": "Pass",
+              "Comment": "GitHub not in systems list",
+              "Result": {
+                "status": "skipped",
+                "system": "github"
+              },
+              "ResultPath": "$.github_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfSlackRequested",
+          "States": {
+            "CheckIfSlackRequested": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.provision_slack",
+                  "BooleanEquals": true,
+                  "Next": "ProvisionSlack"
+                }
+              ],
+              "Default": "SlackSkipped"
+            },
+            "ProvisionSlack": {
+              "Type": "Task",
+              "Resource": "${provision_slack_arn}",
+              "Comment": "Provisions user in Slack workspace",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.slack_error",
+                  "Next": "SlackProvisioningFailed"
+                }
+              ],
+              "ResultPath": "$.slack_result",
+              "End": true
+            },
+            "SlackProvisioningFailed": {
+              "Type": "Pass",
+              "Comment": "Slack provisioning failed, but continue with other systems",
+              "Result": {
+                "status": "failed",
+                "system": "slack"
+              },
+              "ResultPath": "$.slack_result",
+              "End": true
+            },
+            "SlackSkipped": {
+              "Type": "Pass",
+              "Comment": "Slack not in systems list",
+              "Result": {
+                "status": "skipped",
+                "system": "slack"
+              },
+              "ResultPath": "$.slack_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfAWSRequested",
+          "States": {
+            "CheckIfAWSRequested": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.provision_aws",
+                  "BooleanEquals": true,
+                  "Next": "ProvisionAWS"
+                }
+              ],
+              "Default": "AWSSkipped"
+            },
+            "ProvisionAWS": {
+              "Type": "Task",
+              "Resource": "${provision_aws_arn}",
+              "Comment": "Provisions user in AWS IAM",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.aws_error",
+                  "Next": "AWSProvisioningFailed"
+                }
+              ],
+              "ResultPath": "$.aws_result",
+              "End": true
+            },
+            "AWSProvisioningFailed": {
+              "Type": "Pass",
+              "Comment": "AWS provisioning failed, but continue with other systems",
+              "Result": {
+                "status": "failed",
+                "system": "aws"
+              },
+              "ResultPath": "$.aws_result",
+              "End": true
+            },
+            "AWSSkipped": {
+              "Type": "Pass",
+              "Comment": "AWS not in systems list",
+              "Result": {
+                "status": "skipped",
+                "system": "aws"
+              },
+              "ResultPath": "$.aws_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfJiraRequested",
+          "States": {
+            "CheckIfJiraRequested": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.provision_jira",
+                  "BooleanEquals": true,
+                  "Next": "ProvisionJira"
+                }
+              ],
+              "Default": "JiraSkipped"
+            },
+            "ProvisionJira": {
+              "Type": "Task",
+              "Resource": "${provision_jira_arn}",
+              "Comment": "Provisions user in Jira workspace",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.jira_error",
+                  "Next": "JiraProvisioningFailed"
+                }
+              ],
+              "ResultPath": "$.jira_result",
+              "End": true
+            },
+            "JiraProvisioningFailed": {
+              "Type": "Pass",
+              "Comment": "Jira provisioning failed, but continue with other systems",
+              "Result": {
+                "status": "failed",
+                "system": "jira"
+              },
+              "ResultPath": "$.jira_result",
+              "End": true
+            },
+            "JiraSkipped": {
+              "Type": "Pass",
+              "Comment": "Jira not in systems list",
+              "Result": {
+                "status": "skipped",
+                "system": "jira"
+              },
+              "ResultPath": "$.jira_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.provisioning_results",
+      "Next": "AggregateResults"
+    },
+
+    "AggregateResults": {
+      "Type": "Pass",
+      "Comment": "Aggregate provisioning results from all parallel branches",
+      "Parameters": {
+        "user_id.$": "$.user_id",
+        "email.$": "$.email",
+        "systems.$": "$.systems",
+        "results.$": "$.provisioning_results",
+        "workflow_status": "completed",
+        "completed_at.$": "$$.State.EnteredTime"
+      },
+      "Next": "FinalizeExecution"
+    },
+
+    "FinalizeExecution": {
+      "Type": "Task",
+      "Resource": "${finalize_execution_arn}",
+      "Comment": "Updates DynamoDB records to 'active' status and logs completion",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "FinalizationFailed"
+        }
+      ],
+      "End": true
+    },
+
+    "ValidationFailed": {
+      "Type": "Pass",
+      "Comment": "Input validation failed - invalid user data",
+      "Result": {
+        "status": "validation_failed",
+        "message": "Input validation failed. Check user_id, email, role, systems, and github_username fields."
+      },
+      "ResultPath": "$.workflow_result",
+      "Next": "NotifyFailure"
+    },
+
+    "DynamoDBWriteFailed": {
+      "Type": "Pass",
+      "Comment": "Failed to create DynamoDB provisioning records",
+      "Result": {
+        "status": "dynamodb_write_failed",
+        "message": "Failed to create provisioning state records in DynamoDB"
+      },
+      "ResultPath": "$.workflow_result",
+      "Next": "NotifyFailure"
+    },
+
+    "NoSystemsSpecified": {
+      "Type": "Fail",
+      "Comment": "No systems specified in input",
+      "Error": "NoSystemsSpecified",
+      "Cause": "The 'systems' field is empty. Must specify at least one system (aws, github, slack, etc.)"
+    },
+
+    "FinalizationFailed": {
+      "Type": "Pass",
+      "Comment": "Provisioning succeeded but finalization failed",
+      "Result": {
+        "status": "finalization_failed",
+        "message": "Users were provisioned but DynamoDB status update failed. Manual verification required."
+      },
+      "ResultPath": "$.workflow_result",
+      "Next": "NotifyFailure"
+    },
+
+    "UnexpectedError": {
+      "Type": "Pass",
+      "Comment": "Unexpected error occurred",
+      "Result": {
+        "status": "unexpected_error",
+        "message": "An unexpected error occurred during workflow execution"
+      },
+      "ResultPath": "$.workflow_result",
+      "Next": "NotifyFailure"
+    },
+
+    "NotifyFailure": {
+      "Type": "Pass",
+      "Comment": "Notify security team of workflow failure (future: SNS/Slack notification)",
+      "Parameters": {
+        "notification": "Workflow failed",
+        "user_id.$": "$.user_id",
+        "error.$": "$.error",
+        "workflow_result.$": "$.workflow_result"
+      },
+      "Next": "WorkflowFailed"
+    },
+
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Comment": "Workflow execution failed",
+      "Error": "WorkflowExecutionFailed",
+      "Cause": "The onboarding workflow failed. Check CloudWatch Logs for details."
+    }
+  }
+}

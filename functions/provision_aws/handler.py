@@ -82,7 +82,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "aws_provisioning_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "user_id": event.get('user_id')
     }))
 
@@ -150,7 +150,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "aws_provisioning_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "aws_username": aws_username,
             "aws_groups": current_groups
@@ -161,7 +161,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "aws_provisioning_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))

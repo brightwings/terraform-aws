@@ -125,7 +125,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "normalization_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "source": event.get("source", "unknown")
     }))
 

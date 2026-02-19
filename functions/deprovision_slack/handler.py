@@ -77,7 +77,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "slack_deprovisioning_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "user_id": event.get('user_id'),
         "reason": event.get('reason')
     }))
@@ -139,7 +139,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "slack_deprovisioning_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "slack_user_id": slack_user_id,
             "actions_taken": actions_taken
@@ -150,7 +150,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "slack_deprovisioning_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": event.get('user_id'),
             "error": str(e),
             "error_type": type(e).__name__,

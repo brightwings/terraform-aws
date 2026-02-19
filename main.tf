@@ -107,6 +107,24 @@ resource "aws_iam_user" "nicole" {
   )
 }
 
+resource "aws_iam_user" "tf_user_saas_automation" {
+  name = "tf-user-saas-automation"
+  path = "/"
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name    = "tf-user-saas-automation"
+      Purpose = "Terraform automation for SaaS Security Automation Platform"
+    }
+  )
+}
+
+resource "aws_iam_user_group_membership" "tf_user_saas_automation_groups" {
+  user   = aws_iam_user.tf_user_saas_automation.name
+  groups = [module.iam.terraform_automation_group_name]
+}
+
 resource "aws_iam_user" "tf_user_isaac" {
   name = "tf-user-isaac"
   path = "/"
@@ -169,25 +187,275 @@ resource "aws_iam_group" "developers_legacy" {
   path = "/"
 }
 
-# TODO: Wire up once Lambda functions are deployed to AWS
-# module "lambda" {
-#   source = "./modules/lambda"
-# }
-#
-# module "step_functions" {
-#   source = "./modules/step_functions"
-# }
+# =============================================================================
+# Secrets Manager
+# =============================================================================
 
-# Module: EventBridge - Drift Detection Scheduled Trigger
-# TODO: Uncomment once detect_drift Lambda is deployed
-#
-# module "eventbridge" {
-#   source = "./modules/eventbridge"
-#
-#   name_prefix              = local.name_prefix
-#   detect_drift_lambda_arn  = module.lambda.detect_drift_arn
-#   detect_drift_lambda_name = module.lambda.detect_drift_name
-#   drift_check_schedule     = "cron(0 9 * * ? *)"  # Daily at 9am UTC
-#
-#   tags = local.common_tags
-# }
+resource "aws_secretsmanager_secret" "github_token" {
+  name        = "${local.name_prefix}-github-api-token"
+  description = "GitHub personal access token for SaaS automation"
+  tags        = local.common_tags
+}
+
+# NOTE: Populate the secret value manually after deploy:
+# aws secretsmanager put-secret-value \
+#   --secret-id <arn> \
+#   --secret-string '{"token": "ghp_yourtoken"}'
+resource "aws_secretsmanager_secret_version" "github_token" {
+  secret_id     = aws_secretsmanager_secret.github_token.id
+  secret_string = jsonencode({ token = "PLACEHOLDER_REPLACE_AFTER_DEPLOY" })
+
+  lifecycle {
+    ignore_changes = [secret_string] # Prevents Terraform overwriting manual updates
+  }
+}
+
+# =============================================================================
+# SNS - Security Alerts
+# =============================================================================
+
+resource "aws_sns_topic" "security_alerts" {
+  name = "${local.name_prefix}-security-alerts"
+  tags = local.common_tags
+}
+
+# =============================================================================
+# Lambda Functions - Onboarding
+# =============================================================================
+
+locals {
+  common_lambda_env = {
+    PROVISIONING_STATE_TABLE = module.dynamodb.provisioning_state_table_name
+    NAME_PREFIX              = local.name_prefix
+  }
+  github_lambda_env = merge(local.common_lambda_env, {
+    GITHUB_SECRET_ARN = aws_secretsmanager_secret.github_token.arn
+    GITHUB_ORG        = "brightwings"
+  })
+}
+
+module "lambda_validate_input" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-validate-input"
+  source_dir         = "${path.module}/functions/validate_input"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_create_record" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-create-record"
+  source_dir         = "${path.module}/functions/create_record"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_provision_github" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-provision-github"
+  source_dir         = "${path.module}/functions/provision_github"
+  execution_role_arn = module.iam.lambda_provision_github_role_arn
+  environment_variables = local.github_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_provision_slack" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-provision-slack"
+  source_dir         = "${path.module}/functions/provision_slack"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_provision_aws" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-provision-aws"
+  source_dir         = "${path.module}/functions/provision_aws"
+  execution_role_arn = module.iam.lambda_provision_aws_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_provision_jira" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-provision-jira"
+  source_dir         = "${path.module}/functions/provision_jira"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_finalize_execution" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-finalize-execution"
+  source_dir         = "${path.module}/functions/finalize_execution"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+# =============================================================================
+# Lambda Functions - Offboarding
+# =============================================================================
+
+module "lambda_validate_offboarding" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-validate-offboarding"
+  source_dir         = "${path.module}/functions/validate_offboarding"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_mark_deprovisioning" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-mark-deprovisioning"
+  source_dir         = "${path.module}/functions/mark_deprovisioning"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_deprovision_github" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-deprovision-github"
+  source_dir         = "${path.module}/functions/deprovision_github"
+  execution_role_arn = module.iam.lambda_provision_github_role_arn
+  environment_variables = local.github_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_deprovision_slack" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-deprovision-slack"
+  source_dir         = "${path.module}/functions/deprovision_slack"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_deprovision_aws" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-deprovision-aws"
+  source_dir         = "${path.module}/functions/deprovision_aws"
+  execution_role_arn = module.iam.lambda_provision_aws_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_deprovision_jira" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-deprovision-jira"
+  source_dir         = "${path.module}/functions/deprovision_jira"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+module "lambda_finalize_offboarding" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-finalize-offboarding"
+  source_dir         = "${path.module}/functions/finalize_offboarding"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+# =============================================================================
+# Lambda Functions - Ongoing
+# =============================================================================
+
+module "lambda_detect_drift" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-detect-drift"
+  source_dir         = "${path.module}/functions/detect_drift"
+  execution_role_arn = module.iam.lambda_detect_drift_role_arn
+  environment_variables = merge(local.github_lambda_env, {
+    DRIFT_EVENTS_TABLE   = module.dynamodb.drift_events_table_name
+    DRIFT_ALERT_SNS_ARN  = aws_sns_topic.security_alerts.arn
+  })
+  tags = local.common_tags
+}
+
+module "lambda_normalize_telemetry" {
+  source             = "./modules/lambda"
+  function_name      = "${local.name_prefix}-normalize-telemetry"
+  source_dir         = "${path.module}/functions/normalize_telemetry"
+  execution_role_arn = module.iam.lambda_basic_execution_role_arn
+  environment_variables = local.common_lambda_env
+  tags               = local.common_tags
+}
+
+# =============================================================================
+# Step Functions State Machines
+# =============================================================================
+
+resource "aws_sfn_state_machine" "onboarding" {
+  name     = "${local.name_prefix}-onboarding"
+  role_arn = module.iam.step_functions_execution_role_arn
+
+  definition = templatefile("${path.module}/state_machines/onboarding_workflow.json.tftpl", {
+    validate_input_arn    = module.lambda_validate_input.arn
+    create_record_arn     = module.lambda_create_record.arn
+    provision_github_arn  = module.lambda_provision_github.arn
+    provision_slack_arn   = module.lambda_provision_slack.arn
+    provision_aws_arn     = module.lambda_provision_aws.arn
+    provision_jira_arn    = module.lambda_provision_jira.arn
+    finalize_execution_arn = module.lambda_finalize_execution.arn
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.step_functions.arn}:*"
+    include_execution_data = true
+    level                  = "ERROR"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_sfn_state_machine" "offboarding" {
+  name     = "${local.name_prefix}-offboarding"
+  role_arn = module.iam.step_functions_execution_role_arn
+
+  definition = templatefile("${path.module}/state_machines/offboarding_workflow.json.tftpl", {
+    validate_offboarding_arn  = module.lambda_validate_offboarding.arn
+    mark_deprovisioning_arn   = module.lambda_mark_deprovisioning.arn
+    deprovision_github_arn    = module.lambda_deprovision_github.arn
+    deprovision_slack_arn     = module.lambda_deprovision_slack.arn
+    deprovision_aws_arn       = module.lambda_deprovision_aws.arn
+    deprovision_jira_arn      = module.lambda_deprovision_jira.arn
+    finalize_offboarding_arn  = module.lambda_finalize_offboarding.arn
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.step_functions.arn}:*"
+    include_execution_data = true
+    level                  = "ERROR"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "step_functions" {
+  name              = "/aws/states/${local.name_prefix}"
+  retention_in_days = 30
+  tags              = local.common_tags
+}
+
+# =============================================================================
+# EventBridge - Drift Detection Schedule
+# =============================================================================
+
+module "eventbridge" {
+  source = "./modules/eventbridge"
+
+  name_prefix              = local.name_prefix
+  detect_drift_lambda_arn  = module.lambda_detect_drift.arn
+  detect_drift_lambda_name = module.lambda_detect_drift.name
+  drift_check_schedule     = "cron(0 9 * * ? *)"
+
+  tags = local.common_tags
+}

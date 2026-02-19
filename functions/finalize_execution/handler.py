@@ -71,7 +71,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "finalize_execution_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "user_id": event.get('user_id')
     }))
 
@@ -86,6 +86,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         for result_set in results:
             for system_key, system_result in result_set.items():
+                if not system_key.endswith('_result'):
+                    continue
                 # Extract system name from key (e.g., "github_result" → "github")
                 system = system_key.replace('_result', '')
                 status = system_result.get('status', 'unknown')
@@ -126,7 +128,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "finalize_execution_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": user_id,
             "systems_activated": systems_activated,
             "systems_failed": systems_failed
@@ -137,7 +139,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "finalize_execution_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))
@@ -167,10 +169,17 @@ def update_system_status(
             ':finalized_at': {'S': datetime.utcnow().isoformat() + "Z"}
         }
 
-        # Add system-specific metadata
-        if system == 'github' and 'github_username' in metadata:
+        # Add system-specific username for later use by deprovision Lambda
+        username_keys = {
+            'github': 'github_username',
+            'aws': 'aws_username',
+            'slack': 'slack_user_id',
+            'jira': 'jira_user_id'
+        }
+        username_key = username_keys.get(system)
+        if username_key and username_key in metadata:
             update_expression += ', system_username = :username'
-            expression_values[':username'] = {'S': metadata['github_username']}
+            expression_values[':username'] = {'S': metadata[username_key]}
 
         if 'error' in metadata:
             update_expression += ', error_message = :error'

@@ -1,0 +1,423 @@
+{
+  "Comment": "SaaS User Offboarding Workflow - Deprovisions users across all systems in parallel",
+  "StartAt": "ValidateOffboardingRequest",
+  "States": {
+    "ValidateOffboardingRequest": {
+      "Type": "Task",
+      "Resource": "${validate_offboarding_arn}",
+      "Comment": "Validates offboarding request and retrieves user's active systems from DynamoDB",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ValidationFailed"
+        }
+      ],
+      "Next": "CheckIfUserHasActiveAccess"
+    },
+
+    "CheckIfUserHasActiveAccess": {
+      "Type": "Choice",
+      "Comment": "Check if user has any active provisioning (avoid deprovisioning non-existent user)",
+      "Choices": [
+        {
+          "Variable": "$.active_systems",
+          "IsPresent": true,
+          "Next": "MarkDeprovisioningInProgress"
+        }
+      ],
+      "Default": "UserNotProvisioned"
+    },
+
+    "MarkDeprovisioningInProgress": {
+      "Type": "Task",
+      "Resource": "${mark_deprovisioning_arn}",
+      "Comment": "Updates DynamoDB records to 'deprovisioning' status (prevents concurrent operations)",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "MarkingFailed"
+        }
+      ],
+      "Next": "ComputeSystemFlags"
+    },
+
+    "ComputeSystemFlags": {
+      "Type": "Pass",
+      "Comment": "Pre-compute boolean flags stored in $.system_flags to avoid index-out-of-bounds errors while preserving original state",
+      "Parameters": {
+        "deprovision_github.$": "States.ArrayContains($.active_systems, 'github')",
+        "deprovision_slack.$": "States.ArrayContains($.active_systems, 'slack')",
+        "deprovision_aws.$": "States.ArrayContains($.active_systems, 'aws')",
+        "deprovision_jira.$": "States.ArrayContains($.active_systems, 'jira')"
+      },
+      "ResultPath": "$.system_flags",
+      "Next": "DeprovisionSystemsParallel"
+    },
+
+    "DeprovisionSystemsParallel": {
+      "Type": "Parallel",
+      "Comment": "Deprovision all systems in parallel (faster + prevents re-access during process)",
+      "Branches": [
+        {
+          "StartAt": "CheckIfDeprovisionGitHub",
+          "States": {
+            "CheckIfDeprovisionGitHub": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.deprovision_github",
+                  "BooleanEquals": true,
+                  "Next": "DeprovisionGitHub"
+                }
+              ],
+              "Default": "GitHubNotProvisioned"
+            },
+            "DeprovisionGitHub": {
+              "Type": "Task",
+              "Resource": "${deprovision_github_arn}",
+              "Comment": "Removes user from GitHub organization",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.github_error",
+                  "Next": "GitHubDeprovisioningFailed"
+                }
+              ],
+              "ResultPath": "$.github_result",
+              "End": true
+            },
+            "GitHubDeprovisioningFailed": {
+              "Type": "Pass",
+              "Comment": "GitHub deprovisioning failed - CRITICAL: Manual intervention required",
+              "Result": {
+                "status": "failed",
+                "system": "github",
+                "severity": "critical",
+                "action_required": "Manually remove user from GitHub org immediately"
+              },
+              "ResultPath": "$.github_result",
+              "End": true
+            },
+            "GitHubNotProvisioned": {
+              "Type": "Pass",
+              "Comment": "User not provisioned in GitHub (skip)",
+              "Result": {
+                "status": "skipped",
+                "system": "github"
+              },
+              "ResultPath": "$.github_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfDeprovisionSlack",
+          "States": {
+            "CheckIfDeprovisionSlack": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.deprovision_slack",
+                  "BooleanEquals": true,
+                  "Next": "DeprovisionSlack"
+                }
+              ],
+              "Default": "SlackNotProvisioned"
+            },
+            "DeprovisionSlack": {
+              "Type": "Task",
+              "Resource": "${deprovision_slack_arn}",
+              "Comment": "Deactivates user in Slack workspace",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.slack_error",
+                  "Next": "SlackDeprovisioningFailed"
+                }
+              ],
+              "ResultPath": "$.slack_result",
+              "End": true
+            },
+            "SlackDeprovisioningFailed": {
+              "Type": "Pass",
+              "Result": {
+                "status": "failed",
+                "system": "slack",
+                "severity": "high"
+              },
+              "ResultPath": "$.slack_result",
+              "End": true
+            },
+            "SlackNotProvisioned": {
+              "Type": "Pass",
+              "Result": {
+                "status": "skipped",
+                "system": "slack"
+              },
+              "ResultPath": "$.slack_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfDeprovisionAWS",
+          "States": {
+            "CheckIfDeprovisionAWS": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.deprovision_aws",
+                  "BooleanEquals": true,
+                  "Next": "DeprovisionAWS"
+                }
+              ],
+              "Default": "AWSNotProvisioned"
+            },
+            "DeprovisionAWS": {
+              "Type": "Task",
+              "Resource": "${deprovision_aws_arn}",
+              "Comment": "Removes user from IAM groups, deletes access keys, marks for deletion",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.aws_error",
+                  "Next": "AWSDeprovisioningFailed"
+                }
+              ],
+              "ResultPath": "$.aws_result",
+              "End": true
+            },
+            "AWSDeprovisioningFailed": {
+              "Type": "Pass",
+              "Result": {
+                "status": "failed",
+                "system": "aws",
+                "severity": "critical",
+                "action_required": "Manually remove IAM user and delete access keys"
+              },
+              "ResultPath": "$.aws_result",
+              "End": true
+            },
+            "AWSNotProvisioned": {
+              "Type": "Pass",
+              "Result": {
+                "status": "skipped",
+                "system": "aws"
+              },
+              "ResultPath": "$.aws_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckIfDeprovisionJira",
+          "States": {
+            "CheckIfDeprovisionJira": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.system_flags.deprovision_jira",
+                  "BooleanEquals": true,
+                  "Next": "DeprovisionJira"
+                }
+              ],
+              "Default": "JiraNotProvisioned"
+            },
+            "DeprovisionJira": {
+              "Type": "Task",
+              "Resource": "${deprovision_jira_arn}",
+              "Comment": "Removes user from Jira workspace",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.jira_error",
+                  "Next": "JiraDeprovisioningFailed"
+                }
+              ],
+              "ResultPath": "$.jira_result",
+              "End": true
+            },
+            "JiraDeprovisioningFailed": {
+              "Type": "Pass",
+              "Comment": "Jira deprovisioning failed - CRITICAL: Manual intervention required",
+              "Result": {
+                "status": "failed",
+                "system": "jira",
+                "severity": "critical",
+                "action_required": "Manually remove user from Jira workspace immediately"
+              },
+              "ResultPath": "$.jira_result",
+              "End": true
+            },
+            "JiraNotProvisioned": {
+              "Type": "Pass",
+              "Comment": "User not provisioned in Jira (skip)",
+              "Result": {
+                "status": "skipped",
+                "system": "jira"
+              },
+              "ResultPath": "$.jira_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.deprovisioning_results",
+      "Next": "AggregateDeprovisioningResults"
+    },
+
+    "AggregateDeprovisioningResults": {
+      "Type": "Pass",
+      "Comment": "Aggregate deprovisioning results and check for failures",
+      "Parameters": {
+        "user_id.$": "$.user_id",
+        "reason.$": "$.reason",
+        "active_systems.$": "$.active_systems",
+        "results.$": "$.deprovisioning_results",
+        "workflow_status": "completed",
+        "completed_at.$": "$$.State.EnteredTime"
+      },
+      "Next": "FinalizeOffboarding"
+    },
+
+    "FinalizeOffboarding": {
+      "Type": "Task",
+      "Resource": "${finalize_offboarding_arn}",
+      "Comment": "Updates DynamoDB records to 'deprovisioned' status and logs security event",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "FinalizationFailed"
+        }
+      ],
+      "Next": "NotifySecurityTeam"
+    },
+
+    "NotifySecurityTeam": {
+      "Type": "Pass",
+      "Comment": "Send notification to security team (SNS/Slack) with deprovisioning summary",
+      "Parameters": {
+        "notification_type": "offboarding_complete",
+        "user_id.$": "$.user_id",
+        "systems_deprovisioned.$": "$.systems_deprovisioned",
+        "systems_failed.$": "$.systems_failed",
+        "timestamp.$": "$.completed_at"
+      },
+      "End": true
+    },
+
+    "UserNotProvisioned": {
+      "Type": "Fail",
+      "Error": "UserNotProvisioned",
+      "Cause": "User has no active provisioning in any system. Nothing to deprovision."
+    },
+
+    "ValidationFailed": {
+      "Type": "Fail",
+      "Error": "ValidationFailed",
+      "Cause": "Offboarding request validation failed. Check user_id and reason fields."
+    },
+
+    "MarkingFailed": {
+      "Type": "Fail",
+      "Error": "MarkingFailed",
+      "Cause": "Failed to mark provisioning records as 'deprovisioning'. Database may be unavailable."
+    },
+
+    "FinalizationFailed": {
+      "Type": "Pass",
+      "Comment": "CRITICAL: Users were deprovisioned but status update failed - manual verification required",
+      "Result": {
+        "status": "finalization_failed",
+        "severity": "critical",
+        "message": "Users were deprovisioned but DynamoDB status update failed. Manual verification required to confirm all access revoked."
+      },
+      "ResultPath": "$.workflow_result",
+      "Next": "CriticalFailureNotification"
+    },
+
+    "CriticalFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Alert security team of critical failure requiring immediate attention",
+      "Parameters": {
+        "alert_type": "CRITICAL_OFFBOARDING_FAILURE",
+        "user_id.$": "$.user_id",
+        "error.$": "$.error",
+        "action_required": "Manually verify all access revoked and update DynamoDB"
+      },
+      "Next": "WorkflowFailed"
+    },
+
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Error": "OffboardingWorkflowFailed",
+      "Cause": "Offboarding workflow failed. Check CloudWatch Logs and verify access manually."
+    }
+  }
+}

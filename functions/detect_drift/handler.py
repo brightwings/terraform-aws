@@ -132,7 +132,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     logger.info(json.dumps({
         "event": "drift_detection_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "trigger": event.get('source', 'manual')
     }))
 
@@ -199,7 +199,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(json.dumps({
             "event": "drift_detection_complete",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             **result
         }))
 
@@ -208,7 +208,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.error(json.dumps({
             "event": "drift_detection_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))

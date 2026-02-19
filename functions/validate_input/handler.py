@@ -60,7 +60,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # Log incoming request (for debugging and audit trail)
     logger.info(json.dumps({
         "event": "validation_started",
-        "request_id": context.request_id,
+        "request_id": context.aws_request_id,
         "function_name": context.function_name,
         "input": event
     }))
@@ -88,7 +88,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Log success
         logger.info(json.dumps({
             "event": "validation_success",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "user_id": event.get('user_id'),
             "systems": event.get('systems')
         }))
@@ -99,7 +99,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Log validation error
         logger.error(json.dumps({
             "event": "validation_failed",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "input": event
         }))
@@ -111,7 +111,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Log unexpected error
         logger.error(json.dumps({
             "event": "unexpected_error",
-            "request_id": context.request_id,
+            "request_id": context.aws_request_id,
             "error": str(e),
             "error_type": type(e).__name__
         }))
