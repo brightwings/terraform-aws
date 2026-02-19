@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A SaaS Security Automation Platform for Brightwings. It automates the full user access lifecycle (onboarding, offboarding, drift detection, telemetry normalization) across GitHub, Slack, AWS IAM, and Jira using Terraform, Step Functions, and Lambda.
 
-**AWS provider profile**: `tf-user-isaac` (must exist in `~/.aws/credentials`)
+**AWS provider profile**: `tf-user-saas-automation` (must exist in `~/.aws/credentials`)
 **AWS provider version**: `~> 6.31.0`
 **State**: Local (`terraform.tfstate`) — no remote backend yet
 
@@ -66,6 +66,6 @@ The platform has three layers:
 
 ## Existing IAM Users (Pre-Automation)
 
-`isaac`, `nicole`, `tf-user-isaac`, `tf-user-nicole` are defined directly in `main.tf` (not in a module) for migration safety. They are assigned to `module.iam.developers_group_name` — the new least-privilege group — not the legacy `administrators` group.
+`isaac`, `nicole`, and `tf-user-saas-automation` are defined directly in `main.tf`. Human users (`isaac`, `nicole`) are assigned to `module.iam.developers_group_name` — the least-privilege developer group. The automation user `tf-user-saas-automation` is assigned to `module.iam.terraform_automation_group_name` with scoped Terraform permissions.
 
-The `administrators` group resource is kept in `main.tf` but has no policy attachment and no members.
+The legacy `administrators` and `developers` (empty) groups are kept for reference but have no members.

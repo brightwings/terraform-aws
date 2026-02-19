@@ -1,16 +1,16 @@
 # modules/iam/terraform_automation_group.tf
 # Purpose: Scoped IAM group for Terraform automation accounts (tf-user-saas-automation)
-# These accounts run `terraform apply` and need infrastructure lifecycle permissions,
-# but should NEVER read secret values or manage user credentials (access keys, passwords).
+# Uses Customer Managed Policies instead of inline policies to avoid 5120 byte group limit
 
 resource "aws_iam_group" "terraform_automation" {
   name = "${var.name_prefix}-terraform-automation"
   path = "/"
 }
 
-resource "aws_iam_group_policy" "terraform_automation" {
-  name  = "terraform-automation-permissions"
-  group = aws_iam_group.terraform_automation.name
+# Customer Managed Policy (not inline - higher limits)
+resource "aws_iam_policy" "terraform_automation" {
+  name        = "${var.name_prefix}-terraform-automation-permissions"
+  description = "Terraform automation permissions for infrastructure deployment"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -32,8 +32,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "iam:ListUserTags"
         ]
         Resource = "arn:aws:iam::${var.aws_account_id}:user/*"
-        # Manages human users declared in Terraform config
-        # Does NOT include CreateAccessKey/DeleteAccessKey - Lambda handles credential lifecycle
       },
       {
         Sid    = "IAMGroupManagement"
@@ -75,7 +73,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "iam:ListAttachedRolePolicies"
         ]
         Resource = "arn:aws:iam::${var.aws_account_id}:role/${var.name_prefix}-*"
-        # Scoped to platform roles only
       },
       {
         Sid    = "IAMPassRole"
@@ -90,7 +87,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
             ]
           }
         }
-        # Required for Terraform to attach IAM roles to Lambda and Step Functions
       },
       {
         Sid    = "IAMReadOnly"
@@ -103,7 +99,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "iam:ListInstanceProfilesForRole"
         ]
         Resource = "*"
-        # Read-only access needed for Terraform plan to detect drift
       },
       {
         Sid    = "LambdaManagement"
@@ -116,6 +111,7 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
           "lambda:ListFunctions",
+          "lambda:ListVersionsByFunction",
           "lambda:AddPermission",
           "lambda:RemovePermission",
           "lambda:GetPolicy",
@@ -124,8 +120,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "lambda:GetFunctionCodeSigningConfig"
         ]
         Resource = "arn:aws:lambda:${var.aws_region}:${var.aws_account_id}:function:${var.name_prefix}-*"
-        # Full Lambda lifecycle, scoped to platform functions only
-        # Does NOT include InvokeFunction - tf bots deploy code, don't run it
       },
       {
         Sid    = "DynamoDBManagement"
@@ -144,7 +138,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "dynamodb:ListTagsOfResource"
         ]
         Resource = "arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/${var.name_prefix}-*"
-        # Infrastructure management only - does NOT include data operations (GetItem, PutItem, etc.)
       },
       {
         Sid    = "StepFunctionsManagement"
@@ -154,12 +147,12 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "states:DeleteStateMachine",
           "states:DescribeStateMachine",
           "states:ListStateMachines",
+          "states:ListStateMachineVersions",
           "states:UpdateStateMachine",
           "states:TagResource",
           "states:ListTagsForResource"
         ]
         Resource = "arn:aws:states:${var.aws_region}:${var.aws_account_id}:stateMachine:${var.name_prefix}-*"
-        # Does NOT include StartExecution - tf bots don't trigger workflows
       },
       {
         Sid    = "SecretsManagerManagement"
@@ -174,7 +167,6 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "secretsmanager:GetResourcePolicy"
         ]
         Resource = "arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:${var.name_prefix}-*"
-        # Can create and manage secrets, but NOT read values (GetSecretValue excluded)
       },
       {
         Sid    = "SNSManagement"
@@ -216,11 +208,13 @@ resource "aws_iam_group_policy" "terraform_automation" {
           "logs:PutRetentionPolicy",
           "logs:DeleteRetentionPolicy",
           "logs:TagLogGroup",
-          "logs:ListTagsLogGroup"
+          "logs:ListTagsLogGroup",
+          "logs:ListTagsForResource"
         ]
         Resource = [
           "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/${var.name_prefix}-*",
-          "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/states/${var.name_prefix}*"
+          "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/states/${var.name_prefix}*",
+          "*"
         ]
       },
       {
@@ -228,13 +222,18 @@ resource "aws_iam_group_policy" "terraform_automation" {
         Effect = "Allow"
         Action = ["sts:GetCallerIdentity"]
         Resource = "*"
-        # Required for Terraform data sources (aws_caller_identity)
       }
     ]
   })
 }
 
-# Explicit DENY - overrides any Allow, even from other groups
+# Attach managed policy to group
+resource "aws_iam_group_policy_attachment" "terraform_automation" {
+  group      = aws_iam_group.terraform_automation.name
+  policy_arn = aws_iam_policy.terraform_automation.arn
+}
+
+# Explicit DENY - kept as inline policy (small, critical)
 resource "aws_iam_group_policy" "terraform_automation_deny" {
   name  = "terraform-automation-deny"
   group = aws_iam_group.terraform_automation.name
@@ -247,7 +246,6 @@ resource "aws_iam_group_policy" "terraform_automation_deny" {
         Effect = "Deny"
         Action = ["secretsmanager:GetSecretValue"]
         Resource = "*"
-        # tf bots deploy infrastructure, never read API tokens or credentials
       },
       {
         Sid    = "DenyCredentialManagement"
@@ -261,7 +259,6 @@ resource "aws_iam_group_policy" "terraform_automation_deny" {
           "iam:UpdateLoginProfile"
         ]
         Resource = "*"
-        # Credential lifecycle belongs to lambda_provision_aws, not tf bots
       },
       {
         Sid    = "DenyPrivilegeEscalation"
@@ -277,8 +274,6 @@ resource "aws_iam_group_policy" "terraform_automation_deny" {
           "iam:DeleteUserPolicy"
         ]
         Resource = "*"
-        # Cannot create arbitrary policies or attach policies directly to users
-        # All permissions flow through groups and named roles only
       },
       {
         Sid    = "DenyBillingAccess"
@@ -306,8 +301,6 @@ resource "aws_iam_group_policy" "terraform_automation_deny" {
           "states:StopExecution"
         ]
         Resource = "*"
-        # tf bots manage infrastructure only, never read/write application data
-        # or trigger workflows
       }
     ]
   })

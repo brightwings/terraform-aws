@@ -66,23 +66,11 @@ module "iam" {
   depends_on = [module.dynamodb]
 }
 
-# MIGRATION NOTE: Existing IAM users and groups
-# Your existing main.tf has these resources:
-# - aws_iam_user.isaac
-# - aws_iam_user.nicole
-# - aws_iam_user.tf_user_isaac
-# - aws_iam_user.tf_user_nicole
-# - aws_iam_group.administrators
-# - aws_iam_group_policy_attachment.administrators_admin_access (AdministratorAccess - INSECURE!)
-#
-# TO MIGRATE:
-# 1. Keep existing user resources in main.tf (below) for now
-# 2. Remove users from 'administrators' group
-# 3. Add users to new 'developers' group (from iam module)
-# 4. Remove AdministratorAccess policy attachment
-# 5. Eventually: Move user definitions to separate users.tf file
-
-# Existing IAM Users (Kept for compatibility during migration)
+# =============================================================================
+# IAM Users (Human and Automation)
+# =============================================================================
+# Human users (isaac, nicole) are assigned to the developers group
+# Automation user (tf-user-saas-automation) is assigned to terraform_automation group
 resource "aws_iam_user" "isaac" {
   name = "isaac"
   path = "/"
@@ -125,31 +113,7 @@ resource "aws_iam_user_group_membership" "tf_user_saas_automation_groups" {
   groups = [module.iam.terraform_automation_group_name]
 }
 
-resource "aws_iam_user" "tf_user_isaac" {
-  name = "tf-user-isaac"
-  path = "/"
-
-  tags = merge(
-    local.common_tags,
-    {
-      Name    = "tf-user-isaac"
-      Purpose = "Terraform automation"
-    }
-  )
-}
-
-resource "aws_iam_user" "tf_user_nicole" {
-  name = "tf-user-nicole"
-  path = "/"
-
-  tags = merge(
-    local.common_tags,
-    {
-      Name    = "tf-user-nicole"
-      Purpose = "Terraform automation"
-    }
-  )
-}
+# tf-user-isaac and tf-user-nicole removed - replaced by tf-user-saas-automation
 
 # NEW: Add isaac and nicole to secure developers group
 resource "aws_iam_user_group_membership" "isaac_groups" {
@@ -166,16 +130,16 @@ resource "aws_iam_user_group_membership" "nicole_groups" {
   ]
 }
 
-# OLD administrators group (kept for reference, but no users assigned)
+# OLD administrators group (kept for break-glass emergency access)
 # SECURITY NOTE: This group has AdministratorAccess (full AWS access)
-# We're migrating away from this to the new developers group
+# Should only be used temporarily with explicit approval
 resource "aws_iam_group" "administrators" {
   name = "administrators"
   path = "/"
 }
 
-# TODO: REMOVE THIS - Insecure AdministratorAccess policy
-# Kept temporarily for migration safety
+# AdministratorAccess policy attachment - commented out for security
+# Uncomment only for break-glass emergency access
 # resource "aws_iam_group_policy_attachment" "administrators_admin_access" {
 #   group      = aws_iam_group.administrators.name
 #   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
@@ -197,18 +161,15 @@ resource "aws_secretsmanager_secret" "github_token" {
   tags        = local.common_tags
 }
 
-# NOTE: Populate the secret value manually after deploy:
+# NOTE: Secret VALUE must be populated manually after deployment.
+# Terraform creates the secret container but does NOT manage the value
+# (this prevents tf-user-saas-automation from needing GetSecretValue permission).
+#
+# To populate the secret:
 # aws secretsmanager put-secret-value \
-#   --secret-id <arn> \
-#   --secret-string '{"token": "ghp_yourtoken"}'
-resource "aws_secretsmanager_secret_version" "github_token" {
-  secret_id     = aws_secretsmanager_secret.github_token.id
-  secret_string = jsonencode({ token = "PLACEHOLDER_REPLACE_AFTER_DEPLOY" })
-
-  lifecycle {
-    ignore_changes = [secret_string] # Prevents Terraform overwriting manual updates
-  }
-}
+#   --secret-id ${local.name_prefix}-github-api-token \
+#   --secret-string '{"token": "ghp_YOUR_GITHUB_TOKEN_HERE"}' \
+#   --profile <your-admin-profile>
 
 # =============================================================================
 # SNS - Security Alerts
