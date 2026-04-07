@@ -17,6 +17,12 @@ venv/
 # Lambda build artifacts
 .build/
 
+# Local-only docs (not for public repo)
+CLAUDE.md
+INTERVIEW_STUDY_GUIDE.md
+PHASE_3_COMPLETE.md
+PLAN.md
+
 # Backup files
 *.old
 
