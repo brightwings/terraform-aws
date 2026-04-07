@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+
+# Lambda build artifacts
+.build/
+
+# Backup files
+*.old
+
+# AWS credentials (never commit!)
+.aws/
+credentials
